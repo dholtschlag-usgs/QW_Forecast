@@ -1,0 +1,490 @@
+---
+title: "Smith Creek near New Market, VA"
+author: "Dave Holtschlag"
+date: "January 18, 2018"
+output: html_document
+---
+
+The analysis involves forecast NO2- + NO3-N concentrations at Smith Creek near New Market, Va. 
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(ggthemes)
+library(GGally)
+# scales implements function boxcox_trans
+library(scales)
+library(MASS)
+library(mgcv)
+library(astsa)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Read streamflow and water quality data for Smith Creek
+
+Daily flow and water-quality data for 01632900 Smith Creek near New Market, VA, was retrieved from NWIS. The resulting data file was stored as 01632900.txt.  This code chunk reads and renames selected fields labelled with parameter code and statistic codes to more familiar codes.  None included fields include agency_cd, site_no, and field associated with minimum or maximum daily values. The daily median nitrate nitrogen concentration (NO23_MEDI) was considered the target variable. 
+
+```{r read_data}
+df <- read_tsv(file = '../data/01632900.txt', comment = '#')
+
+sta_no   <- '01632900'
+sta_name <- 'Smith Creek near New Market, VA'
+
+df1 <- df %>% 
+   rename(flow_mean = `144686_00060_00003`,
+          flow_code = `144686_00060_00003_cd`,
+          temp_medi = `144689_00010_00008`,
+          temp_code = `144689_00010_00008_cd`,
+          sc25_medi = `144692_00095_00008`,
+          sc25_code = `144692_00095_00008_cd`,
+          pH_medi   = `144695_00400_00008`,
+          pH_code   = `144695_00400_00008_cd`,
+          DO_medi   = `144701_00300_00008`,
+          DO_code   = `144701_00300_00008_cd`,
+          NO23_medi = `144704_99133_00008`,
+          NO23_code = `144704_99133_00008_cd`,
+          turb_medi = `214378_63680_00008`,
+          turb_code = `214378_63680_00008_cd`) %>% 
+   dplyr::select(datetime,
+                 flow_mean, flow_code, temp_medi, temp_code,
+                 sc25_medi, sc25_code, pH_medi,   pH_code,  
+                 pH_medi,   pH_code,   DO_medi,   DO_code,
+                 NO23_medi, NO23_code, turb_medi, turb_code)
+
+```
+
+### Time series plots of selected parameters
+
+
+```{r time_plots}
+
+# Streamflow
+df1 %>% 
+   ggplot( aes(x = datetime, y = flow_mean, color = flow_code)) +
+   geom_point() +
+   theme_few()  +
+   geom_vline( xintercept = df1$datetime[which(is.na(df1$flow_mean))], 
+               color = 'grey', alpha = 0.1) +
+   scale_y_continuous( trans = 'log10', limits = c(5, 5000), 
+                       breaks = c(5, 10, 50, 100, 500, 1000, 5000)) +
+   labs(x = 'YEAR', y = 'FLOW, IN CUBIC FEET PER SECOND',
+        title = paste('Daily Mean Streamflow at', sta_no, sta_name)) +
+   theme( legend.position = 'bottom')
+
+
+df1 %>% 
+   ggplot( aes(x = datetime, y = temp_medi, color = temp_code)) +
+   geom_point() +
+   theme_few()  + 
+   geom_vline( xintercept = df1$datetime[which(is.na(df1$temp_medi))], 
+               color = 'grey', alpha = 0.5) +
+   scale_y_continuous( trans = 'identity', limits = c(0, 30)) +
+   labs(x = 'YEAR', y = 'TEMPERATURE, IN DEGREES CELCIUS',
+        title = paste('Daily Median Water Temperature at', sta_no, sta_name)) +
+   theme( legend.position = 'bottom')
+
+
+# Find range of lambda parameters to normalize specific conductance at 25 degC
+boxcox_sc25 <- boxcox(df1$sc25_medi ~ 1, lambda = seq(4,5, 1/10))
+# Find lambda with maximum likelihood
+ndx_max <- which.max(boxcox_sc25$y)
+
+# boxcox (bc) transformation
+df1$sc25_bcstd <- ( df1$sc25_medi^boxcox_sc25$x[ndx_max] - 1 ) / boxcox_sc25$x[ndx_max]
+# standardizing (std) transformation 
+df1$sc25_bcstd <- (df1$sc25_bcstd - mean(df1$sc25_bcstd, na.rm = TRUE ) ) / 
+   sd(df1$sc25_bcstd, na.rm = TRUE)
+
+# Transformed Specific Conductance 
+df1 %>% 
+   ggplot( aes(x = datetime, y = sc25_medi, color = sc25_code)) +
+   geom_point() +
+   theme_few()  +
+   geom_vline( xintercept = df1$datetime[which(is.na(df1$sc25_medi))], 
+               color = 'grey', alpha = 0.5) +
+   geom_smooth( method = 'lm') +
+   scale_y_continuous( trans = boxcox_trans(p=boxcox_sc25$x[ndx_max]) ) +
+   labs(x = 'Year', y = expression(paste('Specific conductance,in  ',mu,'-siemens/cm at '*25~degree*C)), 
+        title = paste('Specific conductance at ', sta_no, sta_name)) +
+   theme( legend.position = 'bottom') 
+
+rlm_sc25_bcstd <- rlm(df1$sc25_bcstd[1:1995] ~ df1$datetime[1:1995])
+print(summary(rlm_sc25_bcstd))
+
+
+# Plot of pH
+df1 %>% 
+   ggplot( aes(x = datetime, y = pH_medi, color = pH_code)) +
+   geom_jitter( height = 0.03) +
+   theme_few()  +
+   geom_vline( xintercept = df1$datetime[which(is.na(df1$pH_medi))], 
+               color = 'grey', alpha = 0.5) +
+   scale_y_continuous( trans = 'identity') +
+   labs(x = 'YEAR', y = 'pH', 
+        subtitle = 'Note: Jitter added to pH, which is rounded to 0.1 units.',
+        title = paste('pH at ', sta_no, sta_name)) +
+   theme( legend.position = 'bottom') 
+
+# Plot Dissolved Oxygen
+df1 %>% 
+   ggplot( aes(x = datetime, y = DO_medi, color = DO_code)) +
+   geom_point() +
+   theme_few()  +
+   geom_vline( xintercept = df1$datetime[which(is.na(df1$DO_medi))], 
+               color = 'grey', alpha = 0.5) +
+   scale_y_continuous( trans = 'identity') +
+   labs(x = 'YEAR', y = 'Dissolved oxygen, in mg/L', 
+        title = paste('Daily Median Dissolved Oxygen at ', sta_no, sta_name)) +
+   theme( legend.position = 'bottom') 
+
+# Plot of Nitrate plus nitrite nitrogen
+df1 %>% 
+   ggplot( aes(x = datetime, y = NO23_medi, color = NO23_code)) +
+   geom_point() +
+   geom_smooth( method = 'rlm' ) +
+   theme_few()  +
+   geom_vline( xintercept = df1$datetime[which(is.na(df1$NO23_medi))], 
+               color = 'grey', alpha = 0.5) +
+   scale_y_continuous( trans = 'identity') +
+   labs(x = 'Year', y = expression(~NO[3]~ + ~NO[2]~ 'Nitrogen, in mg/L' ), 
+        title = paste(expression('Daily Median' ~NO[3]~ + ~NO[2]~ 'Nitrogen at'),sta_name) ) +
+   theme( legend.position = 'bottom') 
+
+
+# Note: Data for rows 1:1995 includes only the archived data (not provisional)
+lm1 <- lm(NO23_medi ~ datetime, data = df1[1:1995,])
+
+print(summary(lm1))
+
+# Note: Data for rows 1:1995 includes only the archived data (not provisional)
+rlm1 <- rlm(NO23_medi ~ datetime, data = df1[1:1995,])
+
+print(summary(rlm1))
+
+# Plot of turbidity
+df1 %>% 
+   ggplot( aes(x = datetime, y = turb_medi, color = turb_code)) +
+   geom_point() +
+   theme_few()  + 
+   geom_vline( xintercept = df1$datetime[which(is.na(df1$turb_medi))], 
+               color = 'grey', alpha = 0.5) +
+   scale_y_continuous( trans = 'log10', limits = c(0.1, 500),
+                       breaks = c(0.1, 0.5, 1, 5, 10, 50, 100, 500) ) +
+   labs(x = 'Year', y = paste('Turbidity, FNU'), 
+        title = paste('Daily Median Turbidity at',sta_no, sta_name ) ) +
+   theme( legend.position = 'bottom') 
+
+```
+
+
+### Multivariate associations among parameters
+
+```{r plot_matrix, warning = FALSE, fig.width = 9, fig.height = 8}
+
+df1 %>% 
+   mutate(log_flow = log10(flow_mean),
+          log_turb = log10(turb_medi)) %>% 
+   ggpairs(columns = c('log_flow', 'temp_medi', 'sc25_medi', 'pH_medi', 'DO_medi',
+                       'log_turb', 'NO23_medi'),
+           lower = list(continuous = 'points', alpha = 0.2, size = 0.02),
+           title = 'Relations among parameters at Smith Creek near New Market, Va.') +
+   theme_few() 
+
+
+```
+
+
+```{r load_data, eval = TRUE}
+# Define day-of-year for seasonal function
+df1$doy      <- as.numeric(format(df1$datetime, '%j'))
+df1$delT     <- as.numeric(df1$datetime - df1$datetime[1] + 1)
+df1$log_flow <- log10(df1$flow_mean)
+df1$dlq      <- c(NA,diff(df1$log_flow))
+df1$sin1_doy <- sin(2 * pi * df1$doy / 366)
+df1$sin2_doy <- sin(2*2 * pi * df1$doy / 366)
+df1$cos1_doy <- cos(2 * pi * df1$doy / 366)
+df1$cos2_doy <- cos(2*2 * pi * df1$doy / 366)
+
+load(file = "C:/Home/Projects/NawqaIWS/QW_forecast/sea01632900.RData")
+df1 <- left_join(df1, sea01632900, by = 'doy')
+
+
+# Use subset that excludes provisional NO23 data
+df2          <- df1[1:1995, ]
+```
+
+
+```{r model_ts}
+# Model series as AR(1) process
+ar1_logQ  <- sarima(df2$log_flow, 1, 0, 0) 
+print(ar1_logQ)
+
+# Model log_flow as an arma(2,0,1) process
+ar2_logQ  <- sarima(df2$log_flow, 2, 0, 1) 
+print(ar2_logQ)
+
+# Model log_flow as an ar_1_lmsea component where lmsea was based on a lm using period of record
+ar1_logQ_lmsea <- sarima(df2$log_flow, 1, 0, 0, 
+                      xreg = cbind(df2$sincos))
+print(ar1_logQ_lmsea)
+
+# Model log_flow as an ar_1gamsea component where gamsea was based on a gam using period of record
+ar1_logQ_gamsea <- sarima(df2$log_flow, 1, 0, 0, 
+                      xreg = cbind(df2$gamsea))
+print(ar1_logQ_gamsea)
+
+# Model log_flow as an ar_1_sincos where sincos components are based on sample period
+ar1_logQ_sincos <- sarima(df2$log_flow, 1, 0, 0,
+                          xreg = cbind(df2$sin1_doy, df2$cos1_doy))
+
+print(ar1_logQ_sincos)
+
+# Conclude: sin and cos components for sampled doy looks adequate and practical
+
+df2$log_flow_pred <- df2$log_flow - ar1_logQ_sincos$fit$residuals
+
+df2 %>% 
+   ggplot( aes( x = datetime)) +
+   geom_line(aes(y = log_flow), color = 'blue') +
+   geom_line(aes(y = log_flow_pred), color = 'red') +
+   # scale_x_date(limits = as.Date(c('01/01/2014', '01/01/2018'), format = '%d/%m/%Y')) +
+   labs( x = 'Year', y = 'log10 Daily Flow, in ft^3/s',
+         title = 'Relation between measured and predicated flow at 01632900 Smith Creek near New Market, Va.') +
+   geom_vline( xintercept = df2$datetime[which(is.na(df2$flow_mean))], 
+               color = 'grey', alpha = 1) +
+   theme_few()
+
+```
+
+
+
+```{r sarima_NO23, fig.width = 9}
+
+# AR(1) without seasonal component
+ar100_NO23     <- sarima(df2$NO23_medi, 1, 0, 0 ) 
+print(ar100_NO23) 
+# AICc = -3.198275
+
+# AR(1) with sampled seasonal component
+ar100_NO23_sincos <- sarima(df2$NO23_medi, 1, 0, 0, 
+                      xreg = cbind(df2$sin1_doy, df2$cos1_doy) )
+print(ar100_NO23_sincos)
+# AICc: -3.19685
+
+ar100_NO23_sc  <- sarima(df2$NO23_medi, 1, 0, 0, 
+                      xreg = df2$sc25_bcstd ); 
+print(ar100_NO23_sc )
+# AICc: -3.573532 -- Better than model w or w/o sampled seasonal component
+df2$ar100_NO23_sc_pred <- df2$NO23_medi - ar100_NO23_sc$fit$residuals
+acf2(ar100_NO23_sc$fit$residuals)
+
+ar101_NO23_sc  <- sarima(df2$NO23_medi, 1, 0, 1, 
+                      xreg = df2$sc25_bcstd ); 
+print(ar101_NO23_sc )
+acf2(ar101_NO23_sc$fit$residuals)
+df2$ar101_NO23_sc_pred <- df2$NO23_medi - ar101_NO23_sc$fit$residuals
+
+# NO23 concentration with ar(2) and x = sc25bcstd
+ar200_NO23_sc  <- sarima(df2$NO23_medi, 2, 0, 0, 
+                      xreg = df2$sc25_bcstd ); 
+print(ar200_NO23_sc )
+acf2(ar200_NO23_sc$fit$residuals)
+df2$ar200_NO23_sc_pred  <- df2$NO23_medi - ar200_NO23_sc$fit$residuals
+df2$ar200_NO23_sc_resid <- ar200_NO23_sc$fit$residuals
+
+df2 %>% 
+   ggplot( aes( x = datetime)) +
+   geom_vline( xintercept = df2$datetime[which(is.na(df2$NO23_medi))], 
+               color = 'grey', alpha = 1) +
+   geom_line(aes(y = NO23_medi), color = 'blue') +
+   geom_line(aes(y = ar200_NO23_sc_pred), color = 'red') +
+   # scale_x_date(limits = as.Date(c('01/01/2014', '01/01/2018'), format = '%d/%m/%Y')) +
+   labs( x = 'Year', y = 'log10 Daily Flow, in ft^3/s',
+         title = 'Time series of measured and predicated flow at 01632900 Smith Creek near New Market, Va.') +
+   theme_few()
+
+
+df2 %>% 
+   ggplot( aes( x = datetime, y = ar200_NO23_sc$fit$residuals)) +
+   geom_vline( xintercept = df2$datetime[which(is.na(df2$NO23_medi))], 
+               color = 'grey', alpha = 1) +
+   geom_point() +
+   theme_few() +
+   geom_hline( yintercept = 0, color = 'red', linetype = 'dashed')
+
+df2 %>% 
+   ggplot( aes(x = ar200_NO23_sc$fit$residuals)) +
+   geom_density() +
+   stat_function(fun = dnorm, args = list(mean = mean(ar200_NO23_sc$fit$residuals, na.rm = TRUE), 
+                                          sd = sd(ar200_NO23_sc$fit$residuals, na.rm = TRUE)), 
+                 color = 'red', linetype = 'solid') +
+   theme_few() +
+   theme()     +
+   labs( x = 'NO3- + NO2-N Residuals from Model', y = 'Probability Density',
+         title = paste('Distribution of NO3- + NO2-N residuals from AR(2,0)X(sc25_bcstd) at Streamgage ', sta_no) )
+
+
+y1 <- quantile(ar200_NO23_sc$fit$residuals[!is.na(ar200_NO23_sc$fit$residuals)], c(0.25, 0.75))
+x1 <- qnorm( c(0.25, 0.75) )
+slope <- diff(y1)/diff(x1)
+int   <- y1[1L] - slope * x1[1L]
+
+df2 %>%
+   ggplot( aes( sample = ar200_NO23_sc$fit$residuals)) +
+   geom_qq(geom = "point", distribution = stats::qnorm,
+           na.rm = FALSE) +
+   theme_few() +
+   geom_abline( intercept = int, slope = slope, color = 'blue', linetype = 'dashed') +
+   labs( x = 'Standard Normal Quantiles', y = 'AR(2) NO3- + NO2-N Residual Quantiles',
+         title = 'Heavy Tailed Distribution of AR(2)X(sc25) Residuals Relative to Normal')
+
+
+save(df2, file = 'df2_AR2Xsc25.RData')
+
+```
+
+
+
+```{r next_step, eval = FALSE}
+
+
+sar_200     <- sarima(df2$NO23_medi, 2, 0, 0); print(sar_200) # AICc = -3.229706  * 
+
+sar_201     <- sarima(df2$NO23_medi, 2, 0, 1); print(sar_201) # AICc = -3.22893
+
+# Trend
+sar_200_trnd   <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$delT))
+print(sar_200_trnd) # AICc = -3.22999 *, df = 1828
+
+# Flow
+sar_200_lflow  <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$log_flow))
+print(sar_200_lflow) # AICc = -3.229706, df = 1828
+
+# Water temperature
+sar_200_temp   <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$temp_medi))  
+print(sar_200_temp)  # AICc = -3.232070, df = 1813
+
+# sc25 indicates the bc and std transformed 
+sar_200_sc25  <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$sc25_bcstd))
+print(sar_200_sc25) # AICc = -3.636874, df = 1772 
+
+# pH_medi
+sar_200_pHmedi <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$pH_medi))
+print(sar_200_pHmedi) # AICc = -3.335286, df = 1808
+
+# DO_medi
+sar_200_DOmedi <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$DO_medi))
+print(sar_200_DOmedi) # AICc = -3.245214, df = 1806
+
+# log10(turb_medi)
+sar_200_lnTurb <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$log_turb))
+print(sar_200_lnTurb) # AICc = -3.229706, df = 1829
+
+# flow and sc25
+sar_200_FlowSc25 <- sarima(df1$NO23_medi, 2, 0, 0, xreg = cbind(df1$log_flow, df1$sc25_bcstd)) 
+print(sar_200_FlowSc25) # AICc = -3.577086, df = 1899
+
+
+
+# AICc = -3.206867 sin + cos term adds nothing
+sar_200_sin_cos <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$sin_doy, df2$cos_doy)) 
+print(sar_200_sin_cos) # AICc = -3.228434
+
+# flow and trnd
+sar_200_FlowTrnd <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$log_flow, df2$delT)) 
+print(sar_200_FlowTrnd) # AICc = -3.22999, df = 1828
+
+# sc25 and trnd
+sar_200_TrndSc25 <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$sc25_bcstd, df2$delT)) 
+print(sar_200_TrndSc25) # AICc = -3.636543, df = 1899
+
+# Preferred Model is sar_200_sc25 AKA ar2SC_NO23
+# sc25 indicates the bc and std transformed 
+ar2SC_NO23           <- sarima(df2$NO23_medi, 2, 0, 0, xreg = cbind(df2$sc25_bcstd))
+print(ar2SC_NO23) # AICc = -3.636874, df = 1772 
+df2$ar2SC_NO23_resid <- ar2SC_NO23$fit$residuals
+df2$ar2SC_NO23_pred  <- df2$NO23_medi - df2$ar2SC_NO23_resid
+
+
+```
+
+### Plot results for AR(2) Model
+
+
+```{r plot_results, eval = FALSE}
+
+# Relation between measured and predicted NO3- + NO2-N concentrations at Smith Cr., VA 
+df2 %>% 
+   ggplot( aes(x = NO23_medi, y = ar2SC_NO23_pred)) +
+   geom_point() + 
+   theme_few()  +
+   geom_abline( intercept = 0, slope = 1, color = 'red', linetype = 'dashed') +
+   labs(x = 'Measured Nitrate + Nitrite Nitrogen, in mg/L', 
+        y = 'AR(2) Predicted Nitrate + Nitrite Nitrogen',
+        title = 'Relation between measured and predicted NO3 + NO2 at Smith Creek, Va.')
+
+# Time series of residual NO3- + NO2-N concentrations at Smith Cr., VA 
+df2 %>% 
+   ggplot( aes(x = datetime, y = ar2SC_NO23_resid)) +
+   geom_point() + 
+   theme_few()  +
+   geom_hline( yintercept = 0, color = 'red', linetype = 'dashed') +
+   labs(x = 'Year', 
+        y = 'Residual AR(2) Nitrate + Nitrite Nitrogen, in mg/L',
+        title = 'Daily Time Series of NO3- + NO2-N Concentrations at Smith Creek, Va.')
+
+```
+
+
+```{r resid_den, eval = FALSE}
+
+df2 %>% 
+   ggplot( aes(x = ar2SC_NO23_resid)) +
+   geom_density() +
+   stat_function(fun = dnorm, args = list(mean = mean(df2$ar2SC_NO23_resid, na.rm = TRUE), 
+                                          sd = sd(df2$ar2SC_NO23_resid, na.rm = TRUE)), 
+                 color = 'red', linetype = 'solid') +
+   theme_few() +
+   theme()     +
+   labs( x = 'NO3- + NO2-N Residuals from AR(2) model', y = 'Probability Density',
+         title = paste('Distribution of NO3- + NO2-N residuals from AR(2) at Streamgage ', sta_no) )
+
+
+y1 <- quantile(df2$ar2SC_NO23_resid[!is.na(df2$ar2SC_NO23_resid)], c(0.25, 0.75))
+x1 <- qnorm( c(0.25, 0.75) )
+slope <- diff(y1)/diff(x1)
+int   <- y1[1L] - slope * x1[1L]
+
+df2 %>% 
+   ggplot( aes( sample = ar2SC_NO23_resid)) +
+   geom_qq(geom = "point", distribution = stats::qnorm,
+           na.rm = FALSE) +
+   theme_few() + 
+   geom_abline( intercept = int, slope = slope, color = 'red', linetype = 'dashed') +
+   labs( x = 'Standard Normal Quantiles', y = 'AR(2) NO3- + NO2-N Residual Quantiles',
+         title = 'Heavy Tailed Distribution of AR(2) Residuals Relative to Normal')
+
+
+```
+
+
+```{r model_acf, eval = FALSE}
+
+# Autocorrelation Function
+acf(df2$ar2SC_NO23_resid, na.action = na.pass)
+title('\nACF of AR(2) NO3- + NO2-N Residuals at Smith Creek')
+
+# Partial autocorrelation Function
+acf(df2$ar2SC_NO23_resid, na.action = na.pass, type = 'partial')
+title('\nPACF of AR(2) NO3- + NO2-N Residuals at Smith Creek')
+
+```
+
+```{r save_model, eval = FALSE}
+
+# Save df2 and selected model object
+save(df2, ar2SC_NO23, file = 'ar2SC_NO23.RData')
+
+
+```
